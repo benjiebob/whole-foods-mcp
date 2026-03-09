@@ -26,7 +26,7 @@ uv run playwright install chromium
 Start Claude Code from the project directory:
 
 ```bash
-cd whole_foods_ordering
+cd whole-foods-mcp
 claude
 ```
 
@@ -52,6 +52,52 @@ Now you can use natural language:
 - *"Add 5 bananas and a dozen eggs to my cart"*
 - *"What's in my cart?"*
 - *"Remove the cheerios from my cart"*
+
+## Demo
+
+Here's an example session — ordering ingredients for a chicken curry:
+
+```
+> please add the items I need to make a chicken curry
+
+I'll add the ingredients for a chicken curry to your Whole Foods cart. Let me search
+and add each item.
+
+Adding 6 items in parallel...
+
+✓ Added: Mary's Chicken Breast Boneless Skinless (~1lb) — $9.99/lb
+✓ Added: 365 Organic Coconut Milk 13.5oz — $2.49
+✓ Added: Yellow Onion — $2.99/lb
+✓ Added: 365 Minced Garlic 4.5oz — $2.99
+✓ Added: Fresh Ginger Root — $6.99/lb
+✓ Added: 365 Organic Curry Powder 1.8oz — $3.49
+
+All 6 items added to your cart. Want me to add rice or naan bread to go with it?
+
+> yeah add some jasmine rice and naan
+
+Adding 2 items...
+
+✓ Added: Lundberg Organic California White Jasmine Rice 2lb — $6.99
+✓ Added: Stonefire Original Naan Bread 2ct — $4.49
+
+Done! Your cart now has 8 items for the chicken curry.
+
+> what's in my cart?
+
+Your Whole Foods cart (8 items, subtotal $40.42):
+
+1. Mary's Chicken Breast Boneless Skinless — $9.99
+2. 365 Organic Coconut Milk — $2.49
+3. Yellow Onion — $2.99
+4. 365 Minced Garlic — $2.99
+5. Fresh Ginger Root — $6.99
+6. 365 Organic Curry Powder — $3.49
+7. Lundberg Jasmine Rice 2lb — $6.99
+8. Stonefire Original Naan Bread — $4.49
+```
+
+> **Note:** On first run, Claude will prompt you to log in to Amazon before adding items. See [step 3](#3-log-in-to-amazon) above.
 
 ## Tools
 
