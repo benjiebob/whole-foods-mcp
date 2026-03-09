@@ -1,0 +1,20 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Browser session state (contains auth cookies)
+.browser_state/
+
+
+# Claude Code local settings (user-specific permissions)
+.claude/
+
+# Order PDFs (personal data)
+03_08_2026/

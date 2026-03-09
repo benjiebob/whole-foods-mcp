@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "whole-foods": {
+      "command": "uv",
+      "args": ["--directory", ".", "run", "python", "server.py"]
+    }
+  }
+}
