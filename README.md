@@ -2,10 +2,11 @@
 
 An [MCP](https://modelcontextprotocol.io) server that automates grocery ordering from Amazon Whole Foods Market. Uses [Playwright](https://playwright.dev/python/) for browser automation and exposes tools for searching products, managing your cart, and batch-adding items.
 
-Built to work with [Claude Code](https://claude.ai/code) — say "add bananas, oat milk, and chicken breast to my cart" and it handles the rest.
+Built to work with [Claude Code](https://claude.ai/code) 
+
+## Demo
 
 https://github.com/user-attachments/assets/8ee0c000-6289-4b2f-86e4-2ebbe237561c
-
 
 ## Prerequisites
 
