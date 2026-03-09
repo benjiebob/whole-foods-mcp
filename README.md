@@ -4,6 +4,9 @@ An [MCP](https://modelcontextprotocol.io) server that automates grocery ordering
 
 Built to work with [Claude Code](https://claude.ai/code) — say "add bananas, oat milk, and chicken breast to my cart" and it handles the rest.
 
+https://github.com/user-attachments/assets/8ee0c000-6289-4b2f-86e4-2ebbe237561c
+
+
 ## Prerequisites
 
 - **Python 3.11+**
