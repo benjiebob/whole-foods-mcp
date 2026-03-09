@@ -15,8 +15,8 @@ Built to work with [Claude Code](https://claude.ai/code) — say "add bananas, o
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/whole_foods_ordering.git
-cd whole_foods_ordering
+git clone https://github.com/benjiebob/whole-foods-mcp.git
+cd whole-foods-mcp
 uv sync
 uv run playwright install chromium
 ```
