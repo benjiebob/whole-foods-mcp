@@ -55,9 +55,7 @@ Now you can use natural language:
 
 ## Demo
 
-https://github.com/user-attachments/assets/PLACEHOLDER
-
-<!-- Replace the above URL: edit this README on GitHub, drag-and-drop wholefoods_mcp_demo.mp4 into the editor, and paste the generated URL -->
+https://github.com/benjiebob/whole-foods-mcp/raw/master/wholefoods_mcp_demo.mp4
 
 ## Tools
 
