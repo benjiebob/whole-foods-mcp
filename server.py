@@ -33,7 +33,7 @@ _context: BrowserContext | None = None
 _main_page: Page | None = None
 
 
-async def _ensure_context() -> BrowserContext:
+async def _ensure_context(headless: bool = True) -> BrowserContext:
     """Launch browser and restore session if needed. Returns the shared context."""
     global _playwright, _browser, _context
 
@@ -43,11 +43,11 @@ async def _ensure_context() -> BrowserContext:
     _playwright = await async_playwright().start()
 
     if STORAGE_FILE.exists():
-        _browser = await _playwright.chromium.launch(headless=False)
+        _browser = await _playwright.chromium.launch(headless=headless)
         _context = await _browser.new_context(storage_state=str(STORAGE_FILE))
     else:
         STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-        _browser = await _playwright.chromium.launch(headless=False)
+        _browser = await _playwright.chromium.launch(headless=headless)
         _context = await _browser.new_context()
 
     return _context
@@ -310,12 +310,24 @@ mcp = FastMCP("whole-foods")
 
 @mcp.tool()
 async def login() -> str:
-    """Open a browser window for the user to log into Amazon.
+    """Open a visible browser window for the user to log into Amazon.
 
     Call this first if the session has expired or on first use.
     The user will need to manually log in and select their Whole Foods store.
-    Once done, call save_session to persist the login.
+    Once done, call save_session to persist the login and switch back to headless.
     """
+    global _browser, _context, _main_page
+
+    # Tear down any existing headless browser
+    if _context:
+        await _save_state()
+        await _browser.close()
+        _context = None
+        _browser = None
+        _main_page = None
+
+    # Launch visible browser for login
+    await _ensure_context(headless=False)
     page = await _get_main_page()
     await page.goto("https://www.amazon.com/ap/signin?openid.pape.max_auth_age=0&openid.return_to=https%3A%2F%2Fwww.amazon.com%2F&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=usflex&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0", wait_until="domcontentloaded")
     return "Browser opened to Amazon login page. Please log in manually, select your Whole Foods store, then call save_session."
@@ -323,12 +335,26 @@ async def login() -> str:
 
 @mcp.tool()
 async def save_session() -> str:
-    """Save the current browser session so it persists across server restarts.
+    """Save the current browser session and switch back to headless mode.
 
-    Call this after logging in or whenever you want to checkpoint the session.
+    Call this after logging in. Persists cookies/storage to disk, then
+    restarts the browser in headless mode for all subsequent operations.
     """
+    global _browser, _context, _main_page
+
     await _save_state()
-    return f"Session saved to {STORAGE_FILE}"
+
+    # Tear down visible browser and relaunch headless
+    if _browser:
+        await _browser.close()
+        _context = None
+        _browser = None
+        _main_page = None
+
+    # Relaunch headless with saved session
+    await _ensure_context(headless=True)
+
+    return f"Session saved to {STORAGE_FILE}. Browser switched to headless mode."
 
 
 @mcp.tool()
