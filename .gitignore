@@ -13,8 +13,8 @@ wheels/
 .browser_state/
 
 
-# Claude Code local settings (user-specific permissions)
-.claude/
+# Claude Code local settings (user-specific, not shared)
+.claude/settings.local.json
 
 # Order PDFs (personal data)
 03_08_2026/

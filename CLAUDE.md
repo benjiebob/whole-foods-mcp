@@ -37,8 +37,8 @@ Brand ID `VUZHIFdob2xlIEZvb2Rz` (base64 "UFG Whole Foods") is used across all en
 | `login` | Opens browser to Amazon login page |
 | `save_session` | Persists browser session to disk |
 | `search_whole_foods` | Search products, returns top 10 with prices, ATC availability, and product URLs |
-| `add_to_cart` | Search + add a single item (handles weight-based via product page fallback) |
-| `add_grocery_list` | Batch add multiple items (handles quantities, weight-based, and delays) |
+| `add_to_cart` | Add a specific ASIN to cart (requires query + ASIN from search_whole_foods; handles weight-based via product page fallback) |
+| `add_grocery_list` | Batch add multiple items by ASIN (requires query + ASIN per item) |
 | `view_cart` | Navigate to cart and return item summary with ASINs |
 | `remove_from_cart` | Remove a specific item by ASIN (Playwright native click, verifies removal) |
 | `clear_cart` | Clear all items via "Clear cart" button + confirmation dialog |
@@ -70,15 +70,15 @@ Weight-based items (bananas, fresh chicken, apples, pork chops, sweet potatoes) 
 
 This works for both `isItemSoldByCount: true` (per-each like bananas) and `isItemSoldByCount: false` (by-weight like chicken breast).
 
-## Relevance Scoring
+## Item Selection (Claude-in-the-loop)
 
-To avoid wrong matches (e.g., "banana" matching frozen banana snacks), the server uses keyword overlap scoring:
+The server does NOT auto-select items. The workflow is:
 
-1. All search results are scored by how many query words appear in the title
-2. Results sorted by score descending
-3. If the best match has ATC, use it directly
-4. If a lower-ranked ATC result scores >= 0.75, use that instead
-5. Otherwise, fall back to product page for the best match's ASIN
+1. **Claude calls `search_whole_foods`** with a simple query → gets results with ASINs
+2. **Claude evaluates** the results and picks the right ASIN
+3. **Claude calls `add_to_cart`** with the specific query + ASIN
+
+This avoids wrong matches (e.g., "banana" adding frozen banana snacks). The LLM's judgment is far better than keyword scoring for deciding if "Organic Sugarbee Apple" is a reasonable substitute for "Organic Fuji Apple".
 
 ## Cart Management
 
@@ -88,26 +88,31 @@ To avoid wrong matches (e.g., "banana" matching frozen banana snacks), the serve
 ### Clearing the cart
 `clear_cart` uses JS `.click()` to click the "Clear cart" link, waits for the confirmation dialog, then clicks "Clear" to confirm. JS clicks are used here to avoid Playwright's pointer-event interception issues with modal overlays.
 
-## Parallel Adding Strategy
+## Parallel Strategy
 
-When adding multiple items, launch parallel agents (up to 6 at a time) each calling `add_to_cart` for a single item. This is much faster than `add_grocery_list` which processes sequentially.
+When adding multiple items, the workflow is:
+
+1. **Search in parallel**: Launch parallel agents each calling `search_whole_foods` with simple queries
+2. **Evaluate results**: Review all search results and pick the correct ASIN for each item
+3. **Add in parallel**: Launch parallel agents each calling `add_to_cart(query, asin, qty)`
 
 ```
 User: "Add these 12 items"
-  Batch 1 (6 agents in parallel):
-    Agent 1: add_to_cart("banana fresh conventional", qty=5)
-    Agent 2: add_to_cart("organic fuji apple", qty=5)
-    Agent 3: add_to_cart("Honey Nut Cheerios family size")
-    Agent 4: add_to_cart("Oatly oat milk 64 oz")
-    Agent 5: add_to_cart("Guinness non alcoholic stout 4 pack")
-    Agent 6: add_to_cart("Tony's Chocolonely milk chocolate 32%")
-  Batch 2 (remaining 6 agents in parallel):
-    Agent 7-12: ...
+  Step 1 — Search (6 agents in parallel):
+    Agent 1: search_whole_foods("banana")
+    Agent 2: search_whole_foods("apple")
+    Agent 3: search_whole_foods("cheerios")
+    ...
+  Step 2 — Evaluate results, pick ASINs
+  Step 3 — Add (6 agents in parallel):
+    Agent 1: add_to_cart("banana", "B07FYYKKQK", qty=5)
+    Agent 2: add_to_cart("apple", "B07NQDTD7D", qty=5)
+    ...
 ```
 
 Each `add_to_cart` creates its own browser page via `_new_wf_page()`, so there are no CSRF token conflicts. Cap at 6 concurrent agents to avoid Amazon rate limiting.
 
-Use `add_grocery_list` as a fallback if agents aren't available or for small lists (3 items or fewer).
+Use `add_grocery_list` for batch adding when you already have all ASINs.
 
 ### Parallel Searching
 
@@ -119,19 +124,21 @@ Use `screenshot_product` or `screenshot_search` to take screenshots, then view t
 
 ## Search Query Tips
 
-| Item Type | Recommended Query Pattern | Notes |
+**Use simple, short queries (1-2 words) for best results, especially produce:**
+
+| Item Type | Good Query | Bad Query |
 |---|---|---|
-| Fresh produce (weight-based) | `banana fresh conventional` | Added via product page |
-| Fresh meat (weight-based) | `organic boneless skinless chicken breast fresh Mary's` | Added via product page |
-| Pre-packaged items | `Tillamook extra sharp white cheddar cheese block 8 oz` | Has ATC in search |
-| Store-brand items | `365 whole foods minced garlic 4.5 oz` | Search with "365" prefix |
-| Instacart store-brands | Search for the generic product type | Will get WF/365 brand |
+| Fresh produce | `banana`, `apple`, `nectarine` | `organic fuji apple fresh produce` |
+| Fresh meat | `pork loin chop` | `organic boneless skinless pork loin chop fresh` |
+| Pre-packaged | `cheerios`, `oatly oat milk` | Works fine with more words |
+| Store-brand | `365 orange juice` | `365 whole foods organic no pulp OJ 52 fl oz` |
 
 **Key tips:**
-- Be specific: include brand, size, and "fresh"/"organic" when relevant
-- Weight-based items are handled automatically — no need for workarounds
-- For quantities > 1, the API accepts a `quantity` field; falls back to re-searching for fresh CSRF tokens per add if that fails
-- 400ms delay between items to avoid rate limiting
+- Multi-word queries dilute produce results badly — keep it simple
+- When an item isn't found, try related items as separate searches (peach → nectarine, plum)
+- Weight-based items show `can_add_to_cart=false` in search but CAN be added via product page fallback
+- HTTP 400 from `add_to_cart` means genuinely unavailable at the store
+- Product page URLs require `fpw=alm&s=wholefoods` params for valid ATC data
 
 ## Limitations
 

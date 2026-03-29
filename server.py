@@ -43,11 +43,11 @@ async def _ensure_context() -> BrowserContext:
     _playwright = await async_playwright().start()
 
     if STORAGE_FILE.exists():
-        _browser = await _playwright.chromium.launch(headless=True)
+        _browser = await _playwright.chromium.launch(headless=False)
         _context = await _browser.new_context(storage_state=str(STORAGE_FILE))
     else:
         STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-        _browser = await _playwright.chromium.launch(headless=True)
+        _browser = await _playwright.chromium.launch(headless=False)
         _context = await _browser.new_context()
 
     return _context
@@ -151,7 +151,7 @@ async (query) => {
 
 PRODUCT_DETAILS_JS = """
 async (asin) => {
-    const resp = await fetch(`/dp/${asin}?almBrandId=VUZHIFdob2xlIEZvb2Rz`, {
+    const resp = await fetch(`/dp/${asin}?almBrandId=VUZHIFdob2xlIEZvb2Rz&fpw=alm&s=wholefoods`, {
         credentials: 'include',
         headers: { 'Accept': 'text/html' }
     });
@@ -205,47 +205,22 @@ async (asin) => {
 }
 """
 
-ADD_TO_CART_JS = """
-async ({atcData, quantity}) => {
-    // Try adding with quantity parameter first
-    const payload = { ...atcData };
-    if (quantity && quantity > 1) {
-        payload.quantity = quantity;
+
+# JS to add a specific ASIN to cart.
+# First tries to find ATC data in search results. If not found (weight-based items),
+# falls back to fetching the product page for the ATC payload.
+ADD_BY_SEARCH_JS = """
+async ({query, asin, quantity}) => {
+    // Helper to POST to fresh cart
+    async function addToFreshCart(payload) {
+        return await fetch('/alm/addtofreshcart', {
+            method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify(payload)
+        });
     }
-    const resp = await fetch('/alm/addtofreshcart', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-        },
-        body: JSON.stringify(payload)
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    return await resp.json();
-}
-"""
 
-RELEVANCE_FN = """
-function _scoreRelevance(query, title) {
-    const qWords = query.toLowerCase().split(/\\s+/).filter(w => w.length > 2);
-    const tLower = title.toLowerCase();
-    let matched = 0;
-    for (const w of qWords) {
-        if (tLower.includes(w)) matched++;
-    }
-    return qWords.length > 0 ? matched / qWords.length : 0;
-}
-"""
-
-# JS to search and add in one shot with relevance scoring.
-# If the best-matching result has ATC, add via API.
-# If it doesn't (weight-based), fall back to fetching the product page for the ATC payload.
-SEARCH_AND_ADD_JS = """
-async ({query, quantity}) => {
-    """ + RELEVANCE_FN + """
-
-    // Search
+    // Try search results first
     const resp = await fetch(`/s?k=${encodeURIComponent(query)}&i=wholefoods`, {
         credentials: 'include',
         headers: { 'Accept': 'text/html' }
@@ -253,155 +228,76 @@ async ({query, quantity}) => {
     const html = await resp.text();
     const doc = new DOMParser().parseFromString(html, 'text/html');
 
-    const results = [];
+    let atcData = null;
+    let title = '';
+    let price = '';
     for (const el of doc.querySelectorAll('[data-asin]')) {
-        const asin = el.dataset.asin;
-        if (!asin || asin.length < 5) continue;
-
-        let title = '';
-        for (const sel of ['h2 a span', '.a-text-normal']) {
-            const t = el.querySelector(sel);
-            if (t && t.textContent.trim().length > 5) { title = t.textContent.trim(); break; }
-        }
-        if (!title) { const link = el.querySelector('h2 a'); if (link) title = link.textContent.trim(); }
-        if (!title || title.length < 3) continue;
-
+        if (el.dataset.asin !== asin) continue;
         const atcEl = el.querySelector('[data-action="fresh-add-to-cart"]');
-        let atcData = null;
-        if (atcEl) { try { atcData = JSON.parse(atcEl.getAttribute('data-fresh-add-to-cart')); } catch(e) {} }
-
-        let price = '';
+        if (atcEl) {
+            try { atcData = JSON.parse(atcEl.getAttribute('data-fresh-add-to-cart')); } catch(e) {}
+        }
+        const titleEl = el.querySelector('h2 a span, .a-text-normal');
+        if (titleEl) title = titleEl.textContent.trim();
         const priceEl = el.querySelector('.a-price .a-offscreen');
         if (priceEl) price = priceEl.textContent.trim();
-
-        const score = _scoreRelevance(query, title);
-        results.push({ asin, title, price, hasATC: !!atcData, atcData, score });
+        break;
     }
 
-    if (results.length === 0) {
-        return { success: false, results: [] };
-    }
-
-    // Sort all results by relevance score descending
-    results.sort((a, b) => b.score - a.score);
-
-    // Best overall match
-    const bestMatch = results[0];
-    // Best match that has ATC
-    const bestATC = results.find(r => r.hasATC);
-
-    // Decide: use the best ATC result only if it's reasonably relevant,
-    // otherwise prefer the best overall match via product page
-    const ATC_RELEVANCE_THRESHOLD = 0.75;
-    let chosen = null;
-    let method = 'search';
-
-    if (bestMatch.hasATC) {
-        // Best match also has ATC — ideal case
-        chosen = bestMatch;
-    } else if (bestATC && bestATC.score >= ATC_RELEVANCE_THRESHOLD) {
-        // There's a relevant ATC result, use it
-        chosen = bestATC;
-    } else {
-        // Best match doesn't have ATC and no relevant ATC result exists
-        // → fall back to product page for the best match
-        chosen = bestMatch;
-        method = 'product_page';
-    }
-
-    // Helper to POST to fresh cart
-    async function addToFreshCart(payload) {
-        const r = await fetch('/alm/addtofreshcart', {
-            method: 'POST', credentials: 'include',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-        return r;
-    }
-
-    if (method === 'product_page') {
-        // Fetch the product page to get the ATC payload
-        const ppResp = await fetch(`/dp/${chosen.asin}?almBrandId=VUZHIFdob2xlIEZvb2Rz`, {
+    // If no ATC in search results, try the product page
+    if (!atcData) {
+        const ppResp = await fetch(`/dp/${asin}?almBrandId=VUZHIFdob2xlIEZvb2Rz&fpw=alm&s=wholefoods`, {
             credentials: 'include', headers: { 'Accept': 'text/html' }
         });
         const ppHtml = await ppResp.text();
         const ppDoc = new DOMParser().parseFromString(ppHtml, 'text/html');
 
         const ppTitle = ppDoc.querySelector('#productTitle');
-        if (ppTitle) chosen.title = ppTitle.textContent.trim();
+        if (ppTitle) title = ppTitle.textContent.trim();
+        const ppPrice = ppDoc.querySelector('.a-price .a-offscreen');
+        if (ppPrice) price = ppPrice.textContent.trim();
 
         const ppAtc = ppDoc.querySelector('[data-action="fresh-add-to-cart"]');
         if (!ppAtc) {
-            return {
-                success: false,
-                reason: 'No ATC on product page either',
-                results: results.slice(0, 5).map(r => ({ asin: r.asin, title: r.title, price: r.price, score: r.score }))
-            };
+            return { success: false, reason: 'Item unavailable at this store (no ATC on product page)' };
         }
-        let ppPayload;
-        try { ppPayload = JSON.parse(ppAtc.getAttribute('data-fresh-add-to-cart')); }
-        catch(e) { return { success: false, reason: 'Failed to parse product page ATC' }; }
-
-        // Add with quantity (one at a time from product page since each needs fresh tokens)
-        for (let i = 0; i < quantity; i++) {
-            if (i > 0) {
-                // Re-fetch product page for fresh CSRF token
-                const rr = await fetch(`/dp/${chosen.asin}?almBrandId=VUZHIFdob2xlIEZvb2Rz`, {
-                    credentials: 'include', headers: { 'Accept': 'text/html' }
-                });
-                const rrHtml = await rr.text();
-                const rrDoc = new DOMParser().parseFromString(rrHtml, 'text/html');
-                const rrAtc = rrDoc.querySelector('[data-action="fresh-add-to-cart"]');
-                if (rrAtc) {
-                    try { ppPayload = JSON.parse(rrAtc.getAttribute('data-fresh-add-to-cart')); } catch(e) {}
-                }
-            }
-            const addR = await addToFreshCart(ppPayload);
-            if (!addR.ok && i === 0) {
-                return { success: false, reason: `HTTP ${addR.status} from product page add` };
-            }
-            if (i < quantity - 1) await new Promise(r => setTimeout(r, 400));
-        }
-
-        return { success: true, title: chosen.title, asin: chosen.asin, price: chosen.price, quantity, method: 'product_page' };
+        try { atcData = JSON.parse(ppAtc.getAttribute('data-fresh-add-to-cart')); }
+        catch(e) { return { success: false, reason: 'Failed to parse product page ATC data' }; }
     }
 
-    // Standard ATC path
-    const payload = { ...chosen.atcData };
+    // Add to cart — try with quantity first, fall back to one-at-a-time
+    const payload = { ...atcData };
     if (quantity > 1) payload.quantity = quantity;
     const addResp = await addToFreshCart(payload);
 
-    if (!addResp.ok) {
-        // Quantity param failed — retry one at a time with fresh tokens
-        if (quantity > 1) {
-            for (let i = 0; i < quantity; i++) {
-                const r2 = await fetch(`/s?k=${encodeURIComponent(query)}&i=wholefoods`, {
-                    credentials: 'include', headers: { 'Accept': 'text/html' }
-                });
-                const h2 = await r2.text();
-                const d2 = new DOMParser().parseFromString(h2, 'text/html');
-                // Find the same ASIN or first ATC
-                for (const el of d2.querySelectorAll('[data-asin]')) {
-                    const atcEl = el.querySelector('[data-action="fresh-add-to-cart"]');
-                    if (atcEl) {
-                        const elAsin = el.dataset.asin;
-                        const score = _scoreRelevance(query, el.textContent);
-                        if (score < ATC_RELEVANCE_THRESHOLD) continue;
-                        try {
-                            const freshData = JSON.parse(atcEl.getAttribute('data-fresh-add-to-cart'));
-                            const r3 = await addToFreshCart(freshData);
-                            if (r3.ok) break;
-                        } catch(e) {}
-                    }
-                }
-                await new Promise(r => setTimeout(r, 400));
-            }
-        } else {
-            throw new Error(`HTTP ${addResp.status}`);
-        }
+    if (addResp.ok) {
+        return { success: true, title, asin, price, quantity };
     }
 
-    return { success: true, title: chosen.title, asin: chosen.asin, price: chosen.price, quantity, method: 'search' };
+    // Bulk failed — try one at a time with fresh tokens
+    if (quantity > 1) {
+        let added = 0;
+        for (let i = 0; i < quantity; i++) {
+            // Re-fetch product page for fresh CSRF token each time
+            const rr = await fetch(`/dp/${asin}?almBrandId=VUZHIFdob2xlIEZvb2Rz&fpw=alm&s=wholefoods`, {
+                credentials: 'include', headers: { 'Accept': 'text/html' }
+            });
+            const rrHtml = await rr.text();
+            const rrDoc = new DOMParser().parseFromString(rrHtml, 'text/html');
+            const rrAtc = rrDoc.querySelector('[data-action="fresh-add-to-cart"]');
+            if (rrAtc) {
+                try {
+                    const freshData = JSON.parse(rrAtc.getAttribute('data-fresh-add-to-cart'));
+                    const r3 = await addToFreshCart(freshData);
+                    if (r3.ok) added++;
+                } catch(e) {}
+            }
+            await new Promise(r => setTimeout(r, 400));
+        }
+        if (added > 0) return { success: true, title, asin, price, quantity: added };
+    }
+
+    return { success: false, reason: 'Item unavailable at this store (HTTP ' + addResp.status + ')' };
 }
 """
 
@@ -439,8 +335,21 @@ async def save_session() -> str:
 async def search_whole_foods(query: str) -> str:
     """Search for a product on Whole Foods.
 
+    IMPORTANT SEARCH TIPS:
+    - Use simple, short queries (1-2 words) for best results, especially for produce.
+      Good: "banana", "nectarine", "apple"
+      Bad: "organic fuji apple fresh produce", "fresh peach nectarine plum stone fruit"
+    - Multi-word queries dilute results and often return irrelevant items.
+    - When an item isn't found, try related items as SEPARATE searches
+      (e.g. peach not available → try "nectarine", then "plum" separately).
+    - can_add_to_cart=false does NOT mean unavailable. Weight-based items (produce,
+      meat, deli) show false in search but CAN be added via the product page fallback
+      in add_to_cart. Only HTTP 400 from add_to_cart means truly unavailable.
+    - Bags vs individual: pay attention to whether results are bags (e.g. "48 Ounce Bag")
+      or individual items. Match to what the user actually wants.
+
     Args:
-        query: Search terms (e.g. "organic whole milk 64 oz")
+        query: Search terms — keep short and simple for best results
 
     Returns:
         JSON array of results with asin, title, price, and whether
@@ -464,7 +373,7 @@ async def search_whole_foods(query: str) -> str:
             "description": r.get("description", ""),
             "size": r.get("size", ""),
             "can_add_to_cart": r["hasATC"],
-            "url": f"https://www.amazon.com/dp/{asin}?almBrandId={WF_BRAND_ID}",
+            "url": f"https://www.amazon.com/dp/{asin}?almBrandId={WF_BRAND_ID}&fpw=alm&s=wholefoods",
         }
         summary.append(entry)
 
@@ -472,20 +381,34 @@ async def search_whole_foods(query: str) -> str:
 
 
 @mcp.tool()
-async def add_to_cart(query: str, quantity: int = 1, result_index: int = 0) -> str:
-    """Search for a product and add the matching result to cart.
+async def add_to_cart(query: str, asin: str, quantity: int = 1) -> str:
+    """Add a specific product to cart by its ASIN.
+
+    Use search_whole_foods first to find the right product and get its ASIN,
+    then call this tool with the ASIN to add it. Only items with
+    can_add_to_cart=true in search results can be added.
+
+    IMPORTANT NOTES:
+    - Items with can_add_to_cart=false CAN still be added — this tool automatically
+      falls back to the product page to get add-to-cart data for weight-based items.
+    - HTTP 400 means the item is genuinely unavailable at the selected store.
+      When this happens, search for alternatives with simple queries.
+    - For quantities > 1 of weight-based items, the tool re-fetches the product page
+      for each unit to get fresh CSRF tokens.
 
     Args:
-        query: Search terms (e.g. "Tillamook extra sharp white cheddar")
-        quantity: How many to add (default 1). Handles fresh CSRF tokens per add.
-        result_index: Which search result to add (0 = first match with ATC). Defaults to 0.
+        query: The original search query (needed to find the ASIN's ATC data in search results)
+        asin: The Amazon ASIN of the product to add (from search_whole_foods results)
+        quantity: How many to add (default 1)
 
     Returns:
-        Confirmation of what was added, or an error/weight-based message.
+        Confirmation of what was added, or an error message.
     """
     page = await _new_wf_page()
     try:
-        result = await page.evaluate(SEARCH_AND_ADD_JS, {"query": query, "quantity": quantity})
+        result = await page.evaluate(
+            ADD_BY_SEARCH_JS, {"query": query, "asin": asin, "quantity": quantity}
+        )
     except Exception:
         await page.close()
         raise
@@ -495,22 +418,16 @@ async def add_to_cart(query: str, quantity: int = 1, result_index: int = 0) -> s
     if result.get("success"):
         await _save_state()
         return json.dumps({
-            "added": result["title"],
+            "added": result.get("title", asin),
             "asin": result["asin"],
             "price": result.get("price", ""),
             "quantity": result.get("quantity", quantity),
-            "method": result.get("method", "search"),
         })
     else:
-        found = [{
-            "asin": r["asin"], "title": r["title"],
-            "price": r.get("price", ""),
-            "url": f"https://www.amazon.com/dp/{r['asin']}?almBrandId={WF_BRAND_ID}",
-        } for r in result.get("results", [])]
         return json.dumps({
             "error": "could_not_add",
-            "message": result.get("reason", "No matching results could be added"),
-            "results": found,
+            "asin": asin,
+            "reason": result.get("reason", "Unknown error"),
         })
 
 
@@ -518,18 +435,18 @@ async def add_to_cart(query: str, quantity: int = 1, result_index: int = 0) -> s
 async def add_grocery_list(items: list[dict]) -> str:
     """Add multiple grocery items to the Whole Foods cart.
 
-    Each item gets a fresh search (fresh CSRF tokens) so quantities > 1 work
-    reliably. Weight-based items that can't be added via API are returned
-    separately with product URLs for manual addition.
+    Each item requires an ASIN (from search_whole_foods results).
+    Use search_whole_foods first to find the right products.
 
     Args:
         items: List of objects with keys:
-            - query (str): Search query for the item
+            - query (str): Search query (needed to find ATC data)
+            - asin (str): The ASIN to add
             - quantity (int, optional): Number to add (default 1)
             - name (str, optional): Display name for logging
 
     Returns:
-        JSON summary of successes, failures, and weight-based items needing manual add.
+        JSON summary of successes and failures.
     """
     page = await _new_wf_page()
 
@@ -538,30 +455,30 @@ async def add_grocery_list(items: list[dict]) -> str:
 
     for item in items:
         query = item["query"]
+        asin = item["asin"]
         quantity = item.get("quantity", 1)
         name = item.get("name", query)
 
         try:
             result = await page.evaluate(
-                SEARCH_AND_ADD_JS, {"query": query, "quantity": quantity}
+                ADD_BY_SEARCH_JS, {"query": query, "asin": asin, "quantity": quantity}
             )
 
             if result.get("success"):
                 successes.append({
                     "name": name,
-                    "matched": result["title"][:60],
+                    "matched": result.get("title", asin)[:60],
                     "price": result.get("price", ""),
-                    "quantity": quantity,
-                    "method": result.get("method", "search"),
+                    "quantity": result.get("quantity", quantity),
                 })
             else:
                 failures.append({
                     "name": name,
-                    "reason": result.get("reason", "No matching results"),
-                    "results": result.get("results", [])[:3],
+                    "asin": asin,
+                    "reason": result.get("reason", "Failed to add"),
                 })
         except Exception as e:
-            failures.append({"name": name, "reason": str(e)})
+            failures.append({"name": name, "asin": asin, "reason": str(e)})
 
         await asyncio.sleep(0.4)
 
@@ -586,7 +503,6 @@ async def view_cart() -> str:
     cart_info = await page.evaluate("""
     () => {
         const items = [];
-        // Try to extract cart items from the page
         for (const el of document.querySelectorAll('[data-asin]')) {
             const asin = el.dataset.asin;
             if (!asin || asin.length < 5) continue;
@@ -596,9 +512,57 @@ async def view_cart() -> str:
             if (titleEl) title = titleEl.textContent.trim();
             if (!title) continue;
 
+            // Extract quantity: try multiple approaches
             let qty = '1';
-            const qtyEl = el.querySelector('.a-dropdown-prompt, input[name="quantity"]');
-            if (qtyEl) qty = qtyEl.value || qtyEl.textContent.trim();
+
+            // 1. Look for the quantity number in the stepper/dropdown widget
+            const qtyNum = el.querySelector('span[id^="qs-widget-quantity"]');
+            if (qtyNum) {
+                // Get only direct text, not child element text
+                const num = qtyNum.textContent.trim().replace(/[^0-9]/g, '');
+                if (num) qty = num;
+            }
+
+            // 2. Fallback: dropdown prompt
+            if (qty === '1') {
+                const dd = el.querySelector('.a-dropdown-prompt');
+                if (dd) {
+                    const num = dd.textContent.trim().replace(/[^0-9]/g, '');
+                    if (num) qty = num;
+                }
+            }
+
+            // 3. Fallback: input field
+            if (qty === '1') {
+                const inp = el.querySelector('input[name="quantity"]');
+                if (inp && inp.value) qty = inp.value;
+            }
+
+            // 4. Fallback: data attribute
+            if (qty === '1') {
+                const dq = el.getAttribute('data-quantity');
+                if (dq && dq !== '0') qty = dq;
+            }
+
+            // 5. Fallback: look for stepper value display (common in WF cart)
+            if (qty === '1') {
+                const stepper = el.querySelector('.qs-widget-stepper-value, .sc-quantity-stepper-value');
+                if (stepper) {
+                    const num = stepper.textContent.trim().replace(/[^0-9]/g, '');
+                    if (num) qty = num;
+                }
+            }
+
+            // 6. Fallback: find any bold number near a minus/plus button
+            if (qty === '1') {
+                for (const span of el.querySelectorAll('span.a-size-base.a-text-bold')) {
+                    const num = span.textContent.trim();
+                    if (/^\d+$/.test(num) && parseInt(num) > 0) {
+                        qty = num;
+                        break;
+                    }
+                }
+            }
 
             let price = '';
             const priceEl = el.querySelector('.a-price .a-offscreen, .sc-product-price');
@@ -607,7 +571,6 @@ async def view_cart() -> str:
             items.push({ asin, title: title.substring(0, 80), quantity: qty, price });
         }
 
-        // Try to get subtotal
         let subtotal = '';
         const subtotalEl = document.querySelector('#sc-subtotal-amount-activecart .a-price .a-offscreen, .sc-subtotal');
         if (subtotalEl) subtotal = subtotalEl.textContent.trim();
@@ -772,7 +735,7 @@ async def get_product_details(asin: str) -> str:
     finally:
         await page.close()
 
-    details["url"] = f"https://www.amazon.com/dp/{asin}?almBrandId={WF_BRAND_ID}"
+    details["url"] = f"https://www.amazon.com/dp/{asin}?almBrandId={WF_BRAND_ID}&fpw=alm&s=wholefoods"
     return json.dumps(details, indent=2)
 
 
@@ -787,7 +750,7 @@ async def screenshot_product(asin: str) -> str:
     """
     page = await _new_wf_page()
     try:
-        url = f"https://www.amazon.com/dp/{asin}?almBrandId={WF_BRAND_ID}"
+        url = f"https://www.amazon.com/dp/{asin}?almBrandId={WF_BRAND_ID}&fpw=alm&s=wholefoods"
         await page.goto(url, wait_until="domcontentloaded")
         await asyncio.sleep(2)
 
@@ -832,7 +795,7 @@ async def open_product_page(asin: str) -> str:
         asin: The Amazon ASIN of the product.
     """
     page = await _get_main_page()
-    url = f"https://www.amazon.com/dp/{asin}?almBrandId={WF_BRAND_ID}"
+    url = f"https://www.amazon.com/dp/{asin}?almBrandId={WF_BRAND_ID}&fpw=alm&s=wholefoods"
     await page.goto(url, wait_until="domcontentloaded")
     return f"Opened product page: {url} — the user can now manually add this item."
 
