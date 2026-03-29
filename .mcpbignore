@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+.git/
+.browser_state/
+.claude/
+docs/
+tests/
+*.pyc
+*.mcpb
+*.mcpb.*
+.gitignore
+.mcpbignore
+.pytest_cache/
+CLAUDE.md
+README.md
+.mcp.json

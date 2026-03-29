@@ -1,8 +1,8 @@
 # Whole Foods MCP Server
 
-An [MCP](https://modelcontextprotocol.io) server that automates grocery ordering from Amazon Whole Foods Market. Uses [Playwright](https://playwright.dev/python/) for browser automation and exposes tools for searching products, managing your cart, and batch-adding items.
+An [MCP](https://modelcontextprotocol.io) server that automates grocery ordering from Amazon Whole Foods Market. Uses [Playwright](https://playwright.dev/python/) for browser automation and exposes tools for searching products, managing your cart, and adding items.
 
-Built to work with [Claude Code](https://claude.ai/code) 
+Works with [Claude Code](https://claude.ai/code) and [Claude Desktop](https://claude.ai/download) (via MCPB).
 
 ## Demo
 
@@ -46,7 +46,9 @@ On first use, you need to authenticate your Amazon session:
 4. Make sure your Whole Foods delivery address is selected (check the top-left of amazon.com)
 5. Say: **"save session"** — this persists your login so you don't have to repeat it
 
-Your session is saved locally in `.browser_state/` (gitignored). You'll only need to re-login if your session expires.
+Your session is saved locally in `.browser_state/` (gitignored). You'll only need to re-login if your session expires (typically every few weeks).
+
+> **Note:** If you have Chrome installed, the login window will use Chrome (so your password manager and extensions are available). Otherwise it falls back to Playwright's bundled Chromium.
 
 ### 4. Start shopping
 
@@ -57,33 +59,40 @@ Now you can use natural language:
 - *"What's in my cart?"*
 - *"Remove the cheerios from my cart"*
 
-## Demo
+## Claude Desktop (MCPB)
 
-https://github.com/benjiebob/whole-foods-mcp/raw/master/wholefoods_mcp_demo.mp4
+You can also install this as a one-click extension for Claude Desktop:
+
+```bash
+npm install -g @anthropic-ai/mcpb
+mcpb pack . whole-foods-mcp.mcpb
+```
+
+Then double-click `whole-foods-mcp.mcpb` to install in Claude Desktop.
 
 ## Tools
 
 | Tool | Description |
-|---|---|
+|------|-------------|
 | `login` | Open browser for Amazon login |
 | `save_session` | Persist session cookies to disk |
-| `search_whole_foods` | Search products with prices and availability |
-| `add_to_cart` | Search and add an item (handles weight-based products automatically) |
-| `add_grocery_list` | Batch add multiple items in one call |
+| `search_whole_foods` | Search products — returns ASIN, title, price, size |
+| `get_product_details` | Deep dive into a product — full description, ingredients, image screenshot |
+| `add_to_cart` | Add a product by ASIN (fetches product page for fresh token) |
 | `view_cart` | View current cart contents |
 | `remove_from_cart` | Remove an item by ASIN |
 | `clear_cart` | Clear all cart items |
-| `get_product_details` | Get full product page details (description, size, features) |
-| `screenshot_product` | Screenshot a product page for visual inspection |
-| `screenshot_search` | Screenshot search results for visual inspection |
-| `open_product_page` | Open a product page for manual interaction |
 
 ## How It Works
 
-1. Maintains an authenticated Amazon session via Playwright (headless Chromium)
-2. Searches Whole Foods using Amazon's search API
-3. Extracts add-to-cart payloads from search results (or product pages for weight-based items)
-4. POSTs to Amazon's fresh cart API to add items
-5. Uses relevance scoring to avoid wrong matches
+1. Maintains an authenticated Amazon session via Playwright (headless Chrome/Chromium)
+2. **Search** finds products using Amazon's Whole Foods search
+3. **Add to cart** fetches the product page directly for a fresh add-to-cart token, then POSTs to Amazon's cart API
+4. Weight-based items (produce, fresh meat) are handled automatically — the product page always has the add-to-cart payload
 
-Weight-based items (produce, fresh meat) are handled automatically — the server falls back to the product page to find the add-to-cart payload when it's missing from search results.
+### Tool Design
+
+- **Search is read-only** — `search_whole_foods` never touches the cart
+- **Add to cart is independent of search** — `add_to_cart` only needs an ASIN, it fetches its own token from the product page
+- **Product details include a screenshot** — `get_product_details` returns structured text AND a screenshot so Claude can see the product image
+- **No bulk tools** — Claude handles parallelism natively by calling `add_to_cart` multiple times via agents

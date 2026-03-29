@@ -1,0 +1,22 @@
+{
+  "manifest_version": "0.2",
+  "name": "whole-foods-mcp",
+  "version": "0.1.0",
+  "description": "Shop Whole Foods with Claude. Search products, add to cart, and manage grocery orders.",
+  "author": {
+    "name": "Ben Biggs"
+  },
+  "server": {
+    "type": "python",
+    "entry_point": "server.py",
+    "mcp_config": {
+      "command": "/bin/sh",
+      "args": [
+        "-c",
+        "PATH=\"$HOME/.local/bin:/opt/homebrew/bin:$PATH\" uv --directory \"${__dirname}\" run python server.py"
+      ],
+      "env": {}
+    }
+  },
+  "license": "MIT"
+}

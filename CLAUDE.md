@@ -16,136 +16,97 @@ uv run playwright install chromium # Install/update browser
 
 ## Project Structure
 
-- `server.py` — MCP server with all tools and browser automation logic
+- `server.py` — MCP server with tool definitions and browser management
+- `js/` — JavaScript helpers injected into browser pages
+  - `search.js` — Product search (returns ASINs, titles, prices)
+  - `add_to_cart.js` — Fetches product page ATC payload and POSTs to cart
+  - `product_details.js` — Extracts full product info from product page
+  - `view_cart.js` — Parses cart page for items and quantities
+  - `clear_cart_click.js` — Dismisses modals and clicks "Clear cart"
+  - `clear_cart_find_button.js` — Finds the clear cart button
+  - `clear_cart_confirm.js` — Confirms the clear cart dialog
 - `.browser_state/` — Persisted Playwright session (gitignored, created at runtime)
+- `manifest.json` — MCPB bundle manifest for Claude Desktop distribution
 
 ## Architecture
 
 ### Amazon Whole Foods API Flow
 
-1. **Search**: `GET /s?k={query}&i=wholefoods` — returns HTML with product data
-2. **Extract payload**: Each result has a `<span data-action="fresh-add-to-cart">` element with a `data-fresh-add-to-cart` JSON attribute (contains ASIN, CSRF token, offer listing ID)
+1. **Search**: `GET /s?k={query}&i=wholefoods` → HTML with product data
+2. **Product page**: `GET /dp/{ASIN}?almBrandId=VUZHIFdob2xlIEZvb2Rz` → full details + ATC payload
 3. **Add to cart**: `POST /alm/addtofreshcart` with the extracted JSON payload
 4. **Cart**: `https://www.amazon.com/cart/localmarket?almBrandId=VUZHIFdob2xlIEZvb2Rz`
 
 Brand ID `VUZHIFdob2xlIEZvb2Rz` (base64 "UFG Whole Foods") is used across all endpoints. CSRF tokens are per-page-load and session-bound.
 
-### MCP Tools
+### Tool Responsibilities
 
-| Tool | Purpose |
-|---|---|
-| `login` | Opens browser to Amazon login page |
-| `save_session` | Persists browser session to disk |
-| `search_whole_foods` | Search products, returns top 10 with prices, ATC availability, and product URLs |
-| `add_to_cart` | Add a specific ASIN to cart (requires query + ASIN from search_whole_foods; handles weight-based via product page fallback) |
-| `add_grocery_list` | Batch add multiple items by ASIN (requires query + ASIN per item) |
-| `view_cart` | Navigate to cart and return item summary with ASINs |
-| `remove_from_cart` | Remove a specific item by ASIN (Playwright native click, verifies removal) |
-| `clear_cart` | Clear all items via "Clear cart" button + confirmation dialog |
-| `get_product_details` | Fetch full product description, features, size, and details from product page |
-| `screenshot_product` | Take a screenshot of a product page (view with Read tool) |
-| `screenshot_search` | Take a screenshot of search results (view with Read tool) |
-| `open_product_page` | Open a product page for manual viewing/adding |
+Each tool has a clear, single responsibility:
+
+| Tool | Reads | Writes | Purpose |
+|------|-------|--------|---------|
+| `login` | — | Browser state | Opens visible browser for Amazon sign-in |
+| `save_session` | Browser state | `.browser_state/state.json` | Persists cookies, switches to headless |
+| `search_whole_foods` | Search results | — | Find products (read-only, no side effects) |
+| `get_product_details` | Product page | Screenshot file | Deep dive: text details + product image |
+| `add_to_cart` | Product page | Cart | Adds item by ASIN (fetches fresh ATC token) |
+| `view_cart` | Cart page | — | Read current cart contents |
+| `remove_from_cart` | Cart page | Cart | Remove specific item by ASIN |
+| `clear_cart` | Cart page | Cart | Clear entire cart |
+
+**Key design decisions:**
+
+- `search_whole_foods` is purely read-only — it never touches the cart
+- `add_to_cart` always fetches the product page directly for a fresh ATC token — it does not depend on search results
+- `get_product_details` combines structured data extraction AND a screenshot in one call, so the agent can both read details and see the product image
 
 ### Browser Session Management
 
-Playwright runs a headless Chromium instance with a shared context. Session state (cookies, storage) is saved to `.browser_state/state.json` and restored on restart. First use requires `login` → manual Amazon login → `save_session`.
+Playwright runs headless Chromium (or Chrome if installed) with a shared context. Session state (cookies, storage) is saved to `.browser_state/state.json` and restored on restart. First use requires `login` → manual Amazon login → `save_session`.
 
 **Page management:**
-- `_get_main_page()` — shared page for cart/login navigation tools
-- `_new_wf_page()` — fresh page per search/add operation (enables parallel safety, fresh CSRF tokens)
 
-### Whole Foods Home URL
+- `_get_main_page()` — shared page for cart/login navigation
+- `_new_wf_page()` — fresh page per search/add operation (parallel-safe, fresh CSRF tokens)
 
-`https://www.amazon.com/?i=wholefoods` — used as the base page for fresh search contexts. Do NOT use `?k=grocery&i=wholefoods` as it triggers a "grocery" search.
+**Browser selection:**
 
-## Weight-Based Items
+- Tries Chrome first (`channel="chrome"`) for password manager / extension support
+- Falls back to Playwright's bundled Chromium if Chrome isn't installed
 
-Weight-based items (bananas, fresh chicken, apples, pork chops, sweet potatoes) lack `data-fresh-add-to-cart` in **search results** but DO have it on their **product pages**. The server handles this automatically:
+### Weight-Based Items
 
-1. All search results are scored by relevance (keyword overlap)
-2. If the best match lacks ATC, server fetches the product page HTML (`/dp/{ASIN}?almBrandId=...`)
-3. Extracts the `data-fresh-add-to-cart` payload from the product page
-4. POSTs to `/alm/addtofreshcart` as normal
+Weight-based items (bananas, chicken, apples) lack `data-fresh-add-to-cart` in search results but DO have it on their product pages. Since `add_to_cart` always fetches the product page directly, this is handled automatically.
 
-This works for both `isItemSoldByCount: true` (per-each like bananas) and `isItemSoldByCount: false` (by-weight like chicken breast).
+### Parallel Strategy
 
-## Item Selection (Claude-in-the-loop)
+When adding multiple items, Claude can run agents in parallel:
 
-The server does NOT auto-select items. The workflow is:
+1. **Search in parallel**: Multiple agents each calling `search_whole_foods`
+2. **Evaluate results**: Pick the right ASIN for each item
+3. **Add in parallel**: Multiple agents each calling `add_to_cart`
 
-1. **Claude calls `search_whole_foods`** with a simple query → gets results with ASINs
-2. **Claude evaluates** the results and picks the right ASIN
-3. **Claude calls `add_to_cart`** with the specific query + ASIN
-
-This avoids wrong matches (e.g., "banana" adding frozen banana snacks). The LLM's judgment is far better than keyword scoring for deciding if "Organic Sugarbee Apple" is a reasonable substitute for "Organic Fuji Apple".
-
-## Cart Management
-
-### Removing items
-`remove_from_cart` reloads the cart page each time and uses Playwright's native `.click()` (not JS `.click()`) to reliably trigger Amazon's delete handlers. Verifies the item is gone before returning success.
-
-### Clearing the cart
-`clear_cart` uses JS `.click()` to click the "Clear cart" link, waits for the confirmation dialog, then clicks "Clear" to confirm. JS clicks are used here to avoid Playwright's pointer-event interception issues with modal overlays.
-
-## Parallel Strategy
-
-When adding multiple items, the workflow is:
-
-1. **Search in parallel**: Launch parallel agents each calling `search_whole_foods` with simple queries
-2. **Evaluate results**: Review all search results and pick the correct ASIN for each item
-3. **Add in parallel**: Launch parallel agents each calling `add_to_cart(query, asin, qty)`
-
-```
-User: "Add these 12 items"
-  Step 1 — Search (6 agents in parallel):
-    Agent 1: search_whole_foods("banana")
-    Agent 2: search_whole_foods("apple")
-    Agent 3: search_whole_foods("cheerios")
-    ...
-  Step 2 — Evaluate results, pick ASINs
-  Step 3 — Add (6 agents in parallel):
-    Agent 1: add_to_cart("banana", "B07FYYKKQK", qty=5)
-    Agent 2: add_to_cart("apple", "B07NQDTD7D", qty=5)
-    ...
-```
-
-Each `add_to_cart` creates its own browser page via `_new_wf_page()`, so there are no CSRF token conflicts. Cap at 6 concurrent agents to avoid Amazon rate limiting.
-
-Use `add_grocery_list` for batch adding when you already have all ASINs.
-
-### Parallel Searching
-
-The same pattern works for searches. When comparing options across categories (e.g., "show me NA beers, olive oils, and cereals"), launch parallel agents each calling `search_whole_foods`. For deeper product info, agents can call `get_product_details` with specific ASINs to get full descriptions, feature bullets, and size details from the product page.
-
-### Visual Product Inspection
-
-Use `screenshot_product` or `screenshot_search` to take screenshots, then view them with the Read tool. Screenshots are saved to temp files and can be viewed since Claude is multimodal. **Only use screenshots when needed to resolve ambiguity** — not for routine searches.
+Each `add_to_cart` creates its own browser page via `_new_wf_page()`, so there are no CSRF token conflicts. Cap at 6 concurrent agents.
 
 ## Search Query Tips
 
-**Use simple, short queries (1-2 words) for best results, especially produce:**
-
 | Item Type | Good Query | Bad Query |
-|---|---|---|
-| Fresh produce | `banana`, `apple`, `nectarine` | `organic fuji apple fresh produce` |
-| Fresh meat | `pork loin chop` | `organic boneless skinless pork loin chop fresh` |
+|-----------|-----------|-----------|
+| Fresh produce | `banana`, `apple` | `organic fuji apple fresh produce` |
+| Fresh meat | `chicken thighs` | `organic boneless skinless chicken thighs fresh` |
 | Pre-packaged | `cheerios`, `oatly oat milk` | Works fine with more words |
 | Store-brand | `365 orange juice` | `365 whole foods organic no pulp OJ 52 fl oz` |
 
-**Key tips:**
-- Multi-word queries dilute produce results badly — keep it simple
-- When an item isn't found, try related items as separate searches (peach → nectarine, plum)
-- Weight-based items show `can_add_to_cart=false` in search but CAN be added via product page fallback
-- HTTP 400 from `add_to_cart` means genuinely unavailable at the store
-- Product page URLs require `fpw=alm&s=wholefoods` params for valid ATC data
+## MCPB Distribution
 
-## Limitations
+The server can be packaged as a `.mcpb` file for one-click installation in Claude Desktop:
 
-- CSRF tokens expire with session — search results must be fresh
-- Results are store-specific (depends on user's selected WF location)
-- No price verification — adds best matching result by relevance score
-- Some product page ATC payloads return 400 (rare)
+```bash
+npm install -g @anthropic-ai/mcpb
+mcpb pack . whole-foods-mcp.mcpb
+```
+
+Users install by double-clicking the `.mcpb` file. `uv` handles Python + dependency installation automatically on first run.
 
 ## Reference
 
